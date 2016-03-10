@@ -1,7 +1,7 @@
 defmodule GuardianDb.Test.Repo.Migrations do
   use Ecto.Migration
 
-  def up do
+  def change do
     create table(:guardian_tokens, primary_key: false) do
       add :jti, :string, primary_key: true
       add :typ, :string
@@ -11,12 +11,10 @@ defmodule GuardianDb.Test.Repo.Migrations do
       add :exp, :bigint
       add :jwt, :text
       add :claims, :map
+      add :revoked_at, :datetime
 
       timestamps
     end
-  end
-
-  def down do
-    drop table(:guardian_tokens)
+    create unique_index(:guardian_tokens, [:jti, :aud])
   end
 end

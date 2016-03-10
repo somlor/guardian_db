@@ -31,67 +31,115 @@ defmodule GuardianDb do
       field :exp, :integer
       field :jwt, :string
       field :claims, :map
+      field :revoked_at, Ecto.DateTime
 
       timestamps
     end
 
     @doc """
-    Create a new new token based on the JWT and decoded claims
+    Find one token by matching jti and aud that has not been revoked.
     """
-    def create!(claims, jwt) do
-      prepared_claims = claims |> Dict.put("jwt", jwt) |> Dict.put("claims", claims)
-      GuardianDb.repo.insert cast(%Token{}, prepared_claims, [], [:jti, :typ, :aud, :iss, :sub, :exp, :jwt, :claims])
+    def find_active_by_claims(claims) do
+      jti = Dict.get(claims, "jti")
+      aud = Dict.get(claims, "aud")
+      GuardianDb.repo.one from t in Token,
+        where: t.jti == ^jti,
+        where: t.aud == ^aud,
+        where: is_nil(t.revoked_at)
     end
 
     @doc """
-    Purge any tokens that are expired. This should be done periodically to keep your DB table clean of clutter
+    Create a new new token based on the JWT and decoded claims.
+    """
+    def create!(claims, jwt) do
+      prepared_claims = claims
+      |> Dict.put("jwt", jwt)
+      |> Dict.put("claims", claims)
+
+      cast(%Token{}, prepared_claims, [], [:jti, :typ, :aud, :iss, :sub, :exp, :jwt, :claims])
+      |> GuardianDb.repo.insert!
+    end
+
+    @doc """
+    Update token revoked_at to current datetime.
+    """
+    def revoke(token = %GuardianDb.Token{}) do
+      token
+      |> change(%{revoked_at: Ecto.DateTime.utc})
+      |> GuardianDb.repo.update
+    end
+
+    @doc """
+    Purge any tokens that are expired.
+    This can be done periodically to keep your DB table clean of clutter.
     """
     def purge_expired_tokens! do
       timestamp = Guardian.Utils.timestamp
-      from(t in Token, where: t.exp < ^timestamp) |> GuardianDb.repo.delete_all
+      from(t in Token, where: t.exp < ^timestamp)
+      |> GuardianDb.repo.delete_all
     end
   end
 
-  if !Keyword.get(Application.get_env(:guardian_db, GuardianDb), :repo), do: raise "GuardianDb requires a repo"
+  if !Keyword.get(Application.get_env(:guardian_db, GuardianDb), :repo) do
+    raise "GuardianDb requires a repo"
+  end
 
   @doc """
-  After the JWT is generated, stores the various fields of it in the DB for tracking
+  Callback after the JWT is generated.
+  This stores the various fields of it in the DB for tracking.
   """
   def after_encode_and_sign(resource, type, claims, jwt) do
     case Token.create!(claims, jwt) do
-      { :error, _ } -> { :error, :token_storage_failure }
-      _ -> { :ok, { resource, type, claims, jwt } }
+      { :error, _ } -> {:error, :token_storage_failure}
+      _             -> {:ok, {resource, type, claims, jwt}}
     end
   end
 
   @doc """
-  When a token is verified, check to make sure that it is present in the DB.
-  If the token is found, the verification continues, if not an error is returned.
+  Callback when a token is verified, check to make sure that it is present in the DB.
+  If the token is found, the verification continues. If not an error is returned.
   """
   def on_verify(claims, jwt) do
-    jti = Dict.get(claims, "jti")
-    aud = Dict.get(claims, "aud")
-    case repo.get_by(Token, jti: jti, aud: aud) do
-      nil -> { :error, :token_not_found }
-      _token -> { :ok, { claims, jwt } }
+    case Token.find_active_by_claims(claims) do
+      nil    -> {:error, :token_not_found}
+      _token -> {:ok, {claims, jwt}}
     end
   end
 
   @doc """
-  When logging out, or revoking a token, removes from the database so the token may no longer be used
+  Callback when logging out.
+  If a token is found, #revoke is called.
+  If a token is not found, no error is raised, the claims and jwt are simply passed through.
   """
   def on_revoke(claims, jwt) do
-    jti = Dict.get(claims, "jti")
-    model = repo.get_by(Token, jti: jti)
-    if model do
-      case repo.delete(model) do
-        { :error, _ } -> { :error, :could_not_revoke_token }
-        nil -> { :error, :could_not_revoke_token }
-        _ -> { :ok, { claims, jwt } }
-        end
-    else
-      { :ok, { claims, jwt } }
+    case Token.find_active_by_claims(claims) do
+      nil   -> {:ok, {claims, jwt}}
+      token -> revoke(token, claims, jwt)
     end
+  end
+
+  @doc """
+  This does the work of revoking a token.
+  If delete_revoked is true (default), the token is deleted from the database.
+  If delete_revoked is fale, Token.revoke is called, which sets a revoked_at date.
+  In either case the token may no longer be used.
+  """
+  def revoke(token, claims, jwt) do
+    if delete_revoked? do
+      case repo.delete(token) do
+        {:ok, %Token{}} -> {:ok, {claims, jwt}}
+        _               -> {:error, :could_not_revoke_token}
+      end
+    else
+      case Token.revoke(token) do
+        {:ok, %Token{}} -> {:ok, {claims, jwt}}
+        _               -> {:error, :could_not_revoke_token}
+      end
+    end
+  end
+
+  def delete_revoked? do
+    Dict.get(Application.get_env(:guardian_db, GuardianDb), :delete_revoked)
   end
 
   def repo do

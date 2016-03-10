@@ -23,6 +23,8 @@ use Mix.Config
 #
 #     import_config "#{Mix.env}.exs"
 
-config :guardian_db, GuardianDb, repo: %{}
+config :guardian_db, GuardianDb,
+  repo: %{},
+  delete_revoked: true
 
 if Mix.env == :test or Mix.env == :docs, do: import_config "#{Mix.env}.exs"
